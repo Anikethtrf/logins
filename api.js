@@ -1,60 +1,38 @@
 import { CONFIG } from './config.js';
+import * as V from './validation.js';
+export class CloudError extends Error {constructor(message,status=400){super(message);this.status=status;this.safe=true;}}
 export class Cloud {
-  constructor(session = null, onSession = () => {}) { this.session = session; this.onSession = onSession; this.refreshing = null; }
-  async request(path, {method='GET',body,auth=true,headers={}} = {}) {
-    if (auth) await this.fresh();
-    const res = await fetch(CONFIG.supabaseUrl + path, {
-      method, cache:'no-store', credentials:'omit', referrerPolicy:'no-referrer',
-      headers:{apikey:CONFIG.publishableKey,'Content-Type':'application/json',...(auth ? {Authorization:`Bearer ${this.session.access_token}`} : {}),...headers},
-      ...(body !== undefined ? {body:JSON.stringify(body)} : {}), signal:AbortSignal.timeout(20000)
-    });
-    const raw = await res.text();
-    let data; try { data = raw ? JSON.parse(raw) : null; } catch { throw new Error('The cloud returned an unreadable response.'); }
-    if (!res.ok) {
-      const error = new Error(data?.msg || data?.error_description || data?.message || `Cloud request failed (${res.status}).`);
-      error.status = res.status; throw error;
-    }
-    return data;
-  }
-  async setSession(session) {
-    this.session = {...session, expires_at:session.expires_at || Math.floor(Date.now()/1000)+session.expires_in};
-    await this.onSession(this.session); return this.session;
-  }
-  async fresh() {
-    if (!this.session?.access_token) throw new Error('Please sign in again.');
-    if (this.session.expires_at * 1000 > Date.now()+60000) return;
-    if (!this.refreshing) this.refreshing = this.request('/auth/v1/token?grant_type=refresh_token',{method:'POST',auth:false,body:{refresh_token:this.session.refresh_token}}).then(s=>this.setSession(s)).finally(()=>{this.refreshing=null;});
-    await this.refreshing;
-  }
-  async signIn(email,password) { return this.setSession(await this.request('/auth/v1/token?grant_type=password',{method:'POST',auth:false,body:{email,password}})); }
-  async signUp(email,password) {
-    const result = await this.request('/auth/v1/signup',{method:'POST',auth:false,body:{email,password}});
-    if (result?.access_token) await this.setSession(result);
-    return result;
-  }
-  async signOut() {
-    try { if (this.session) await this.request('/auth/v1/logout?scope=local',{method:'POST'}); } finally {this.session=null;}
-  }
-  get uid() { return this.session?.user?.id; }
-  async metadata() { return (await this.request(`/rest/v1/pocket_vault_meta?user_id=eq.${this.uid}&select=*`))[0] || null; }
-  async createMetadata(meta) { return this.request('/rest/v1/pocket_vault_meta',{method:'POST',body:{user_id:this.uid,...meta},headers:{Prefer:'return=representation'}}); }
-  async listItems() {
-    const all = [];
-    for (let offset=0; ;offset+=500) {
-      const rows = await this.request(`/rest/v1/pocket_vault_items?user_id=eq.${this.uid}&select=*&order=id&limit=500&offset=${offset}`);
-      all.push(...rows); if (rows.length<500) return all;
-    }
-  }
-  async addItem(id, encrypted) {
-    return (await this.request('/rest/v1/pocket_vault_items',{method:'POST',body:{id,user_id:this.uid,encrypted,revision:1},headers:{Prefer:'return=representation'}}))[0];
-  }
-  async updateItem(id,revision,encrypted) {
-    const rows = await this.request(`/rest/v1/pocket_vault_items?id=eq.${encodeURIComponent(id)}&user_id=eq.${this.uid}&revision=eq.${revision}`,{method:'PATCH',body:{encrypted,revision:revision+1,updated_at:new Date().toISOString()},headers:{Prefer:'return=representation'}});
-    if (!rows?.length) throw new Error('This login changed on another device. Refresh the vault and try again.');
-    return rows[0];
-  }
-  async deleteItem(id,revision) {
-    const rows = await this.request(`/rest/v1/pocket_vault_items?id=eq.${encodeURIComponent(id)}&user_id=eq.${this.uid}&revision=eq.${revision}`,{method:'DELETE',headers:{Prefer:'return=representation'}});
-    if (!rows?.length) throw new Error('This login changed on another device. Refresh before deleting.');
-  }
+ constructor(session=null,onSession=()=>{}){this.session=session?V.session(session):null;this.onSession=onSession;this.refreshing=null;this.generation=0;this.controllers=new Set();this.authStarted=Date.now();}
+ clear(){this.generation++;for(const c of this.controllers)c.abort();this.controllers.clear();this.session=null;this.refreshing=null;}
+ async request(path,{method='GET',body,auth=true,headers={}}={}){
+  const authPath=/^\/auth\/v1\/(token\?grant_type=(password|refresh_token)|signup|logout\?scope=local|user|factors\/[0-9a-f-]+\/(challenge|verify))$/.test(path);
+  const restPath=/^\/rest\/v1\/pocket_vault_(meta|items)(\?[^#]*)?$/.test(path);
+  if((!authPath&&!restPath)||/[\r\n#%\\]/.test(path)||path.includes('..'))throw new V.ValidationError('Unsupported API route.');
+  if(!['GET','POST','PATCH','DELETE'].includes(method)||Object.keys(headers).some(k=>k!=='Prefer')||(headers.Prefer&&headers.Prefer!=='return=representation'))throw new V.ValidationError('Unsupported request.');
+  const target=new URL(path,CONFIG.supabaseUrl);if(target.origin!==CONFIG.supabaseUrl||target.protocol!=='https:'||target.username||target.password)throw new V.ValidationError('Invalid API destination.');
+  if(restPath){const seen=new Set();for(const [k,v] of target.searchParams){if(seen.has(k))throw new V.ValidationError('Duplicate filter.');seen.add(k);if(['id','user_id'].includes(k)){if(!v.startsWith('eq.'))throw new V.ValidationError('Invalid filter.');V.uuid(v.slice(3));}else if(k==='revision'){if(!/^eq\.[1-9][0-9]*$/.test(v))throw new V.ValidationError('Invalid revision.');V.integer(Number(v.slice(3)));}else if(k==='select'){if(v!=='*')throw new V.ValidationError('Invalid selection.');}else if(k==='order'){if(v!=='id')throw new V.ValidationError('Invalid sort order.');}else if(k==='limit'||k==='offset'){if(!/^[0-9]+$/.test(v))throw new V.ValidationError('Invalid page.');V.integer(Number(v),k==='offset'?0:1,k==='offset'?2500:500);}else throw new V.ValidationError('Unsupported filter.');}}
+  const generation=this.generation;if(auth)await this.fresh();if(generation!==this.generation)throw new CloudError('Session ended.',401);
+  const ctl=new AbortController();this.controllers.add(ctl);const timeout=setTimeout(()=>ctl.abort(),20000);
+  try{
+   const res=await fetch(target.href,{method,cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:{apikey:CONFIG.publishableKey,'Content-Type':'application/json',...(auth?{Authorization:`Bearer ${this.session.access_token}`}:{ }),...headers},...(body!==undefined?{body:JSON.stringify(body)}:{}),signal:ctl.signal});
+   if(generation!==this.generation)throw new CloudError('Session ended.',401);
+   if(!res.ok){if(res.status===429)throw new CloudError('Too many attempts. Wait a few minutes before retrying.',429);if([400,401,403,422].includes(res.status)&&path.startsWith('/auth/'))throw new CloudError('Sign-in could not be completed. Check your credentials, verification, or authentication code.',res.status);if(res.status===409)throw new CloudError('This record already exists. Refresh your vault.',409);throw new CloudError(auth?'Cloud access was denied or the request failed. Sign in again if needed.':'The request failed. Try again later.',res.status);}
+   const raw=await res.text();if(raw.length>24000000)throw new CloudError('Cloud response exceeds the supported size.');let data;try{data=raw?JSON.parse(raw):null;}catch{throw new CloudError('The cloud returned an unreadable response.');}return data;
+  }finally{clearTimeout(timeout);this.controllers.delete(ctl);}
+ }
+ async setSession(value){const s=V.session(value);if(this.session&&this.session.user.id!==s.user.id)throw new CloudError('Account changed. Sign in again.',401);this.session=s;await this.onSession(s);return s;}
+ async fresh(){if(!this.session)throw new CloudError('Please sign in again.',401);if(Date.now()-this.authStarted>CONFIG.absoluteHours*3600000){this.clear();throw new CloudError('Your session expired. Sign in again.',401);}if(this.session.expires_at*1000>Date.now()+60000)return;
+  if(!this.refreshing){const generation=this.generation;this.refreshing=this.request('/auth/v1/token?grant_type=refresh_token',{method:'POST',auth:false,body:{refresh_token:this.session.refresh_token}}).then(s=>{if(generation!==this.generation)throw new CloudError('Session ended.',401);return this.setSession(s);}).catch(e=>{if(generation===this.generation)this.clear();throw e;}).finally(()=>{if(generation===this.generation)this.refreshing=null;});}await this.refreshing;
+ }
+ async signIn(email,password){const generation=this.generation;const r=await this.request('/auth/v1/token?grant_type=password',{method:'POST',auth:false,body:V.credentials(email,password)});if(generation!==this.generation)throw new CloudError('Session ended.',401);this.authStarted=Date.now();return this.setSession(r);}
+ async signUp(email,password){const generation=this.generation;const r=await this.request('/auth/v1/signup',{method:'POST',auth:false,body:V.credentials(email,password,true)});if(generation!==this.generation)throw new CloudError('Session ended.',401);if(r?.access_token)return this.setSession(r);return {confirmationRequired:true};}
+ async verifyMfa(factorId,code){V.uuid(factorId);V.string(code,6,6,'authentication code');if(!/^\d{6}$/.test(code))throw new V.ValidationError('Enter the six-digit authentication code.');const c=await this.request(`/auth/v1/factors/${factorId}/challenge`,{method:'POST',body:{}});const r=await this.request(`/auth/v1/factors/${factorId}/verify`,{method:'POST',body:{challenge_id:V.uuid(c.id),code}});return this.setSession({...r,user:r.user||this.session.user});}
+ async signOut(){const s=this.session;this.clear();if(s){const other=new Cloud(s);try{await other.request('/auth/v1/logout?scope=local',{method:'POST'});}finally{other.clear();}}}
+ get uid(){return V.uuid(this.session?.user?.id);}
+ async metadata(){const uid=this.uid;const rows=await this.request(`/rest/v1/pocket_vault_meta?user_id=eq.${uid}&select=*&limit=1`);if(!Array.isArray(rows)||rows.length>1)throw new V.ValidationError('Invalid vault response.');return rows[0]?V.metadataRow(rows[0],uid):null;}
+ async createMetadata(meta){const m=V.metadata(meta);return this.request('/rest/v1/pocket_vault_meta',{method:'POST',body:{user_id:this.uid,...m},headers:{Prefer:'return=representation'}});}
+ async listItems(){const all=[],uid=this.uid;for(let offset=0;offset<CONFIG.maxItems+500;offset+=500){const rows=await this.request(`/rest/v1/pocket_vault_items?user_id=eq.${uid}&select=*&order=id&limit=500&offset=${offset}`);if(!Array.isArray(rows)||rows.length>500)throw new V.ValidationError('Invalid vault response.');all.push(...rows.map(r=>V.itemRow(r,uid)));if(all.length>CONFIG.maxItems)throw new CloudError('Vault item limit reached.');if(rows.length<500)return all;}throw new CloudError('Vault item limit reached.');}
+ async addItem(id,encrypted){id=V.uuid(id);encrypted=V.envelope(encrypted);const rows=await this.request('/rest/v1/pocket_vault_items',{method:'POST',body:{id,user_id:this.uid,encrypted,revision:1},headers:{Prefer:'return=representation'}});if(!Array.isArray(rows)||rows.length!==1)throw new CloudError('Save was not confirmed. Refresh your vault before retrying.');return V.itemRow(rows[0],this.uid);}
+ async updateItem(id,revision,encrypted){id=V.uuid(id);revision=V.integer(revision);encrypted=V.envelope(encrypted);const rows=await this.request(`/rest/v1/pocket_vault_items?id=eq.${id}&user_id=eq.${this.uid}&revision=eq.${revision}`,{method:'PATCH',body:{encrypted,revision:revision+1},headers:{Prefer:'return=representation'}});if(!Array.isArray(rows)||rows.length!==1)throw new CloudError('This login changed or is unavailable. Refresh the vault and try again.',409);return V.itemRow(rows[0],this.uid);}
+ async deleteItem(id,revision){id=V.uuid(id);revision=V.integer(revision);const rows=await this.request(`/rest/v1/pocket_vault_items?id=eq.${id}&user_id=eq.${this.uid}&revision=eq.${revision}`,{method:'DELETE',headers:{Prefer:'return=representation'}});if(!Array.isArray(rows)||rows.length!==1)throw new CloudError('This login changed or is unavailable. Refresh before deleting.',409);}
 }
