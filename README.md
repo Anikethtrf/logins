@@ -1,15 +1,17 @@
-# Pocket Vault 1.1 — security hardening update
+# Pocket Vault 1.2 — idle lock and extension fixes
 
 An encrypted cloud vault, desktop Chromium extension, and optional server mode. Source code can be published on GitHub. Your connected Supabase vault tables have already received the 1.1 hardening update.
 
 ## Update an existing installation
 
-1. Replace the old website files with this package's files. Do not mix 1.0 and 1.1 JavaScript files.
+1. Replace the old website files with this package's files. Do not mix old and new JavaScript files.
 2. Replace the installed extension's folder contents and click **Reload** on your browser's extensions page. Alternatively, load the supplied standalone extension ZIP after extracting it.
 3. Sign in and unlock again. Existing encrypted vault records keep the same format and master password.
 4. Test using a throwaway login first. Review `SECURITY-AUDIT.md` for findings, checks, and deployment limits.
 
 Do not rerun `database/setup.sql` or `database/hardening.sql` on the already-configured project. Both changes have been applied. No existing application data was deleted.
+
+Idle auto-lock is disabled in 1.2. Use **Lock vault** manually. The existing eight-hour absolute session limit remains. Website reload/close clears its key; a browser restart clears the extension unlock. Pending save requests still expire after five minutes; this does not lock the vault. No database migration is needed for 1.2.
 
 ## Choose the website's hosting mode
 
@@ -17,12 +19,13 @@ Do not rerun `database/setup.sql` or `database/hardening.sql` on the already-con
 |---|---|---|
 | Encrypted vault, search, edit, copy, delete | Yes | Yes |
 | Owner-only RLS and live-session checks | Yes | Yes |
-| Five-minute local vault lock / eight-hour DB session limit | Yes | Yes |
+| Five-minute idle lock | Off | Off |
+| Eight-hour absolute session limit | Yes | Yes |
 | Strict CSP meta tag | Yes | Yes, plus HTTP CSP headers |
 | Authentication state | Bearer tokens in JS memory only | HttpOnly, Secure, SameSite=Strict opaque cookie |
 | CSRF protection | Cookie-free API calls with explicit bearer tokens | Synchronizer token, Origin, Fetch Metadata, SameSite |
 | App-level server login limits | No; depends on Supabase | Persistent IP and email limits, plus Supabase |
-| Server-enforced five-minute app session timeout | No | Yes |
+| Manual lock / sign-out | Yes | Yes |
 | Header-based anti-framing / application HSTS | Controlled by hosting provider | Included |
 
 For the full cookie/CSRF/server-rate-limit protections requested in this audit, deploy the **Node server mode**, following `server/README.md`. Uploading server files to GitHub Pages does not enable those protections.
@@ -50,7 +53,7 @@ Verified MFA factors are enforced by the database. This app supports entering an
 3. Enable **Developer mode → Load unpacked** and select the folder containing `manifest.json`.
 4. Pin Pocket Vault, open it, and click **Open & unlock vault**.
 5. Sign in with the same account and master password as the website.
-6. In the extension vault tab, choose **Browser extension → Enable login detection**, approve the requested HTTPS website access, and reload any existing login tabs.
+6. In the toolbar popup, click **Enable login detection** and approve HTTPS website access. You can also enable it in the extension vault tab. Already-open permitted tabs are attached automatically. After upgrading an older extension, refresh your login page once.
 7. Submit a supported username/password login. The banner asks **“Save this to my website?”**.
 8. Click **Review & save**. Check the website/account in the extension's own screen, then click **Save login**.
 9. Refresh your website vault to see the encrypted cloud record.
@@ -61,7 +64,7 @@ The extension and website unlock separately. Captured passwords are encrypted in
 
 ### Detection limits
 
-Ordinary top-level HTTPS forms with a username/email and one password are supported. Some custom forms, two-step password-only flows, shadow-DOM/embedded forms, registration/password-change forms, HTTP sites, passkeys, social sign-ins, and basic-auth dialogs are not captured. The extension detects an attempted submission and cannot reliably verify success on every website. Save only after checking that sign-in succeeded.
+Top-level HTTPS forms and common custom login containers with a username/email and one password are supported. Same-document two-step screens can reuse a username entered in the previous step. Two-step flows that load a new document, closed shadow-DOM/embedded forms, registration/password-change forms, HTTP sites, passkeys, social sign-ins, and basic-auth dialogs are not captured. The extension detects an attempted submission and cannot reliably verify success on every website. Save only after checking that sign-in succeeded.
 
 Desktop Chromium browsers only. Mobile Chrome cannot load this extension; the vault website is responsive. No autofill, passkey storage, TOTP storage, or password sharing is included.
 

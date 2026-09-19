@@ -13,7 +13,7 @@ cloud.fresh = async () => { if (extension && key) { const r = await ext({type:'S
 let key=null, meta=null, entries=[], selected=null, editing=null, signup=false, epoch=0, activity=Date.now(), authStarted=Date.now(), accountDigest=null, revealTimer;
 let currentView='vault', authBusy=false, unlockFailures=0, unlockAfter=0, loginAfter=0, loginFailures=0, pendingMfa=null, lastTouch=0;
 const revealTimers=new Map();
-const expired=()=>Date.now()-activity>CONFIG.idleMinutes*60000||Date.now()-authStarted>CONFIG.absoluteHours*3600000;
+const expired=()=>(CONFIG.idleMinutes>0&&Date.now()-activity>CONFIG.idleMinutes*60000)||Date.now()-authStarted>CONFIG.absoluteHours*3600000;
 function requireUnlocked(){if(!key||expired()){lock().catch(()=>{});throw new V.ValidationError('Unlock your vault again.');}}
 function notice(message,error=false) { const el=$('#status');el.textContent=message;el.classList.toggle('error',error);el.hidden=false;clearTimeout(notice.timer);notice.timer=setTimeout(()=>el.hidden=true,error?12000:5500); }
 function report(e) { notice(e.name==='TimeoutError' ? 'Connection timed out. Please try again.' : V.safeMessage(e),true); }
@@ -123,7 +123,7 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState===
 window.addEventListener('pagehide',()=>{eraseUI();cloud.clear();renderState();});
 window.addEventListener('pageshow',e=>{if(e.persisted)location.reload();});
 $('#mfa-form').addEventListener('submit',e=>{e.preventDefault();busy($('#mfa-submit'),async()=>{const ticket=epoch;const code=$('#mfa-code').value;$('#mfa-code').value='';await cloud.verifyMfa(pendingMfa,code);if(ticket!==epoch)return;pendingMfa=null;await prepareUnlock();});});
-$('#enable-detection').addEventListener('click',async()=>{try{const granted=await chrome.permissions.request({origins:['https://*/*']});if(!granted)throw new V.ValidationError('Permission was not granted.');await ext({type:'ENABLE'});await detectionStatus();notice('Login detection enabled. Reload existing login tabs.');}catch(e){report(e);}});
+$('#enable-detection').addEventListener('click',async()=>{try{const granted=await chrome.permissions.request({origins:['https://*/*']});if(!granted)throw new V.ValidationError('Permission was not granted.');await ext({type:'ENABLE'});await detectionStatus();notice('Login detection enabled, including already-open HTTPS tabs.');}catch(e){report(e);}});
 $('#disable-detection').addEventListener('click',async()=>{try{await ext({type:'DISABLE'});await chrome.permissions.remove({origins:['https://*/*']});await detectionStatus();notice('Login detection disabled.');}catch(e){report(e);}});
 async function detectionStatus(){const r=await ext({type:'STATE'});$('#enable-detection').hidden=r.enabled;$('#disable-detection').hidden=!r.enabled;$('#detection-status').textContent=r.enabled?'Login detection is enabled for HTTPS websites.':'Login detection is off until you allow it.';}
 async function init(){

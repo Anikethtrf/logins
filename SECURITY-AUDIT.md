@@ -1,4 +1,4 @@
-# Pocket Vault security audit — version 1.1
+# Pocket Vault security audit — updated for version 1.2
 
 Scope: the saved Pocket Vault 1.0 source archive, website, browser extension, its two live Supabase tables, and the new optional Node server. The starting local source was checked against the saved archive. This review did not test an unknown deployed GitHub URL or inspect the user's computer.
 
@@ -6,12 +6,12 @@ Result: identified gaps were corrected in code, server-side validation was added
 
 ## Findings and fixes
 
-| Finding in the previous implementation | Risk | Change in 1.1 |
+| Finding in the previous implementation | Risk | Current behavior |
 |---|---|---|
 | Input restrictions were inconsistent outside HTML forms; returned encrypted records were not fully schema-checked | Malformed input, resource exhaustion, or broken UI behavior | Shared exact-field schemas validate all credential, login, envelope, UUID, revision, and API-filter boundaries. Database checks independently validate envelope size/format. |
 | Raw provider error messages were displayed | Possible account/backend detail disclosure | Fixed safe messages replace raw auth/database response errors. No request bodies or credentials are logged. |
 | A delayed sign-in/refresh/read could complete after local lock | Session resurrection or stale data display | Abortable requests, generation checks, single-flight refresh, immediate UI clearing, and checks before revealing/copying/saving. |
-| Idle interaction could reset the clock after a suspended tab resumed | Continued access after intended timeout | Expiry is checked before resetting activity. Five-minute idle lock and eight-hour absolute lifetime added. |
+| Idle interaction could reset the clock after a suspended tab resumed | Continued access after intended timeout | The eight-hour absolute lifetime is checked before access. At the owner's request, 1.2 disables the five-minute idle lock; use manual Lock when leaving the device. |
 | Lock cleared local extension state without confirming upstream revocation | Stolen access tokens could outlive local unlock state | Lock attempts local-scope provider sign-out. RLS now requires the signed JWT's session to still exist in Auth. Failures to confirm sign-out are reported by the vault screen. |
 | Owner checks did not check live sessions, confirmation, bans, or existing MFA | Revoked/insufficiently authenticated sessions could continue using data APIs | Restrictive policies require ownership, live matching Auth session, confirmed email, no active ban, less than eight-hour session age, and aal2 if any verified factor exists. |
 | Client could submit arbitrary timestamps/revisions within its own rows | Integrity and conflict-detection weaknesses | Column privileges forbid client updates to owner, ID, and timestamps. Trigger sets timestamps and enforces initial revision 1 and increments of exactly 1. |
@@ -38,7 +38,7 @@ The review found no existing raw SQL construction from vault form input, no shel
 
 - Static/extension auth tokens remain only in memory; no token is added to localStorage, IndexedDB, a URL, or a log.
 - Node mode returns an opaque cookie, never a Supabase access/refresh token. Cookie IDs are hashed before storage; session payloads are encrypted with a deployment-only secret.
-- Five-minute idle timeout and eight-hour absolute lifetime. The Node server enforces both; Supabase policies independently enforce the live-session/eight-hour requirement. Static mode's five-minute idle check is local, not a server-side inactivity guarantee.
+- Idle locking is disabled in 1.2 at the owner's request. The eight-hour absolute lifetime remains enforced by the app, extension, Node server, and live-session database policies. A pre-authentication Node CSRF handshake and pending extension captures still expire after five minutes; neither is an authenticated-vault idle timeout.
 - Sign-in requests are serialized in the UI. Local cooldowns slow repeated attempts, but these are bypassable client controls, not an Internet brute-force defense.
 - Node mode enforces persistent IP/email request limits and generic auth failures. Direct Supabase calls remain subject to Supabase's separate provider limits; current project rate-limit settings were not exposed by the connected tools and were not changed.
 - Existing TOTP MFA challenges are supported. Any verified factor requires aal2 in the data policy. New MFA enrollment and CAPTCHA widgets are not implemented.
@@ -77,7 +77,7 @@ The review found no existing raw SQL construction from vault form input, no shel
 
 ## Test evidence
 
-`npm test` passed 14 test cases, each containing multiple assertions:
+`npm test` passed 21 test cases, each containing multiple assertions:
 
 - Wrong key, modified ciphertext, account/record substitution, canonical envelopes, nonce uniqueness, and non-extractable web keys.
 - Unexpected fields, bad types/IDs, unsafe URL schemes, embedded URL credentials, size limits, and invalid revisions.
@@ -86,8 +86,10 @@ The review found no existing raw SQL construction from vault form input, no shel
 - Cookie flags, no provider tokens in responses, missing/wrong-origin/stale CSRF rejection, session rotation, protected-route behavior, input rejection, static-file allowlisting, and sign-out.
 - Persistent login limits returning HTTP 429, parameterized SQLite queries, encrypted session storage, and survival of rate limits across restarts.
 - Shared website/extension asset consistency, DOM references, CSP placement, safe rendering, external-link protection, and extension message boundaries.
+- Native/custom/same-document two-step capture, rejection of synthetic/registration/vault events, duplicate-injection protection, and prompts after worker notification.
+- Popup permission flow, live pending-list refresh, approval-only saves, manual lock, and extension/server sessions surviving more than five minutes of inactivity.
 
-`tests/rls.sql` passed against the connected database with disposable data in a rolled-back transaction. It tested owner CRUD, cross-account reads/writes/deletes, owner/timestamp mutation, malformed ciphertext, revision enforcement, MFA downgrade rejection, eight-hour expiry, revoked sessions, and anonymous access. Test records were rolled back.
+During the 1.1 audit, `tests/rls.sql` passed against the connected database with disposable data in a rolled-back transaction. It tested owner CRUD, cross-account reads/writes/deletes, owner/timestamp mutation, malformed ciphertext, revision enforcement, MFA downgrade rejection, eight-hour expiry, revoked sessions, and anonymous access. Test records were rolled back. Version 1.2 changes no database rules, and this live SQL test was not rerun for 1.2.
 
 Provider auth and extension APIs were mocked in the local Node tests. The live SQL test exercised real Postgres RLS; it was not a complete browser/Supabase sign-in test. Browser preview remained unavailable, so installed-extension behavior, real email confirmation/TOTP, real TLS cookies, and mobile layout still need the acceptance checks in TESTING.md.
 
